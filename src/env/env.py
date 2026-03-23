@@ -29,3 +29,8 @@ def reset_env(panda_id, obj_ids):
         p.resetJointState(panda_id, i, val)
 
     return []
+
+def settle_objects(steps=500):
+    """Step physics to let spawned objects settle on the table."""
+    for _ in range(steps):
+        p.stepSimulation()

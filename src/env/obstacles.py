@@ -41,7 +41,3 @@ def add_wall(position, size=(0.01, 0.3, 0.15)):
                                 basePosition=position)
     return wall_id
 
-def settle_objects(steps=500):
-    """Step physics to let spawned objects settle on the table."""
-    for _ in range(steps):
-        p.stepSimulation()
