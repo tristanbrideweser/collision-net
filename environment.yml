@@ -13,3 +13,4 @@ dependencies:
     - numpy
     - open3d
     - trimesh
+    - -e .
