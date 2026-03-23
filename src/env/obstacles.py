@@ -29,3 +29,19 @@ def spawn_clutter(
                                    basePosition=pos)
         obj_ids.append(obj_id)
     return obj_ids
+
+def add_wall(position, size=(0.01, 0.3, 0.15)):
+    """Add a vertical wall/barrier on the table."""
+    col = p.createCollisionShape(p.GEOM_BOX, halfExtents=list(size))
+    vis = p.createVisualShape(p.GEOM_BOX, halfExtents=list(size),
+                              rgbaColor=[0.4, 0.4, 0.4, 0.8])
+    wall_id = p.createMultiBody(baseMass=0,
+                                baseCollisionShapeIndex=col,
+                                baseVisualShapeIndex=vis,
+                                basePosition=position)
+    return wall_id
+
+def settle_objects(steps=500):
+    """Step physics to let spawned objects settle on the table."""
+    for _ in range(steps):
+        p.stepSimulation()
