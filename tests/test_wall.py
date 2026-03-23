@@ -1,4 +1,4 @@
-from src.env.obstacles import spawn_clutter
+from src.env.obstacles import add_wall
 import pybullet as p
 import pybullet_data
 import time
@@ -15,10 +15,7 @@ panda_id = p.loadURDF(
     useFixedBase=True
 )
 
-spawn_clutter(num_objects=1, 
-              size_min=0.002,
-              size_max=0.006,
-              base_mass=0.01)
+add_wall((1.0, 0.0, 0.625))
 
 while True:
     p.stepSimulation()
