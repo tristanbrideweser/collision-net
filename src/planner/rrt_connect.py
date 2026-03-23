@@ -1,6 +1,6 @@
 import numpy as np
 import random
-from collision_detector import JOINT_LIMITS, in_collision
+from src.planner.collision_detector import JOINT_LIMITS, in_collision
 
 # Step size of linear interpolation during collision checking
 STEP_SIZE = 0.05
@@ -84,7 +84,7 @@ def RRTConnect(start_conf, goal_conf) -> list[np.ndarray]:
 
     while True:
         # Sample q_rand
-        q_rand, _ = sample_conf()
+        q_rand = sample_conf()
         # Find q_nearest
         q_nearest = find_nearest(q_rand, T1)
         # if Steer from q_nearest to q_rand is possible (collision check)
