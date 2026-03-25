@@ -2,121 +2,106 @@ import numpy as np
 import random
 from src.planner.collision_detector import JOINT_LIMITS, in_collision
 
-# Step size of linear interpolation during collision checking
 STEP_SIZE = 0.05
 
-# Node for RRT Conenct planning
 class RRT_Node:
     def __init__(self, conf):
         self.conf = np.array(conf)
         self.parent = None
-        self.children = []
-
-    def set_parent(self, parent):
-        self.parent = parent
-
-    def add_child(self, child):
-        self.children.append(child)
-
 
 def sample_conf() -> RRT_Node:
     sample = [random.uniform(lo, hi) for lo, hi in JOINT_LIMITS]
-    sample_node = RRT_Node(sample)
-    return sample_node
+    return RRT_Node(sample)
    
-def find_nearest(rand_node: RRT_Node, node_list: list[RRT_Node]) -> RRT_Node:
-    dist = [np.linalg.norm(rand_node.conf - node.conf) for node in node_list]
+def find_nearest(target_conf: np.ndarray, node_list: list[RRT_Node]) -> RRT_Node:
+    dist = [np.linalg.norm(target_conf - node.conf) for node in node_list]
     return node_list[np.argmin(dist)]
 
-def steer_to(rand_node: RRT_Node, nearest_node: RRT_Node) -> bool:
-    direction = rand_node.conf - nearest_node.conf
+def steer_to_until(rand_conf: np.ndarray, nearest_node: RRT_Node) -> RRT_Node:
+    """Extends from nearest_node toward rand_conf until collision or target reached."""
+    direction = rand_conf - nearest_node.conf
     dist = np.linalg.norm(direction)
-    for i in np.arange(STEP_SIZE, dist, STEP_SIZE):
-        temp_conf = nearest_node.conf + direction * i / dist
+    if dist < 1e-6: return nearest_node
+    
+    unit_dir = direction / dist
+    # Determine how many steps to take
+    steps = np.arange(STEP_SIZE, dist, STEP_SIZE)
+    last_valid_conf = nearest_node.conf
+    
+    for s in steps:
+        temp_conf = nearest_node.conf + unit_dir * s
         if in_collision(temp_conf):
-            return False
-    return not in_collision(rand_node.conf)
+            return RRT_Node(last_valid_conf) if not np.array_equal(last_valid_conf, nearest_node.conf) else None
+        last_valid_conf = temp_conf
+    
+    # Check final target if the loop finishes
+    if not in_collision(rand_conf):
+        return RRT_Node(rand_conf)
+    return RRT_Node(last_valid_conf)
 
-def steer_to_until(rand_node: RRT_Node, nearest_node: RRT_Node) -> RRT_Node:
-    direction = rand_node.conf - nearest_node.conf
-    dist = np.linalg.norm(direction)
-    prev = nearest_node.conf
-    for i in np.arange(STEP_SIZE, dist, STEP_SIZE):
-        temp_conf = nearest_node.conf + direction * i / dist
-        if in_collision(temp_conf):
-            return RRT_Node(prev)
-        prev = temp_conf
-    if in_collision(rand_node.conf):
-        return RRT_Node(prev)
-    return rand_node
-
-def path_smoothing(path: list[np.ndarray]) -> list[np.ndarray]:
-    '''
-    Performs path smoothing
-
-    Args:
-        path (list[np.ndarray]): The path to perform smoothing on. 
-
-    Returns:
-        list[np.ndarray]: The path after smoothing.
-    '''
-    # number of iterations to attempt smoothing
-    N = 100
-
-    for _ in range(N):
-        if len(path) <= 3:
-            break
-        [one, two] = np.random.choice(len(path), 2)
-        while abs(one - two) < 2:
-            [one, two] = np.random.choice(len(path), 2)
-        # print((int(one), int(two)))
-        if steer_to(RRT_Node(path[one]), RRT_Node(path[two])):
-            path = path[:min(one, two) + 1] + path[max(one, two):]
-        # if len(path) == 3:
-        #     break
-    return path
-
-def RRTConnect(start_conf, goal_conf) -> list[np.ndarray]:
+def RRTConnect(start_conf, goal_conf, max_iter=5000) -> list[np.ndarray]:
     start_node = RRT_Node(start_conf)
     goal_node = RRT_Node(goal_conf)
-    T1: list[RRT_Node] = [start_node]
-    T2: list[RRT_Node] = [goal_node]
+    
+    # Trees: T_a starts at 'start', T_b starts at 'goal'
+    T_a = [start_node]
+    T_b = [goal_node]
+    
+    # We need to keep track of which tree is which for path reconstruction
+    swapped = False
 
-    while True:
-        # Sample q_rand
+    if in_collision(start_conf) or in_collision(goal_conf):
+        print("Error: Start or Goal is in collision!")
+        return None
+    
+    for i in range(max_iter):
+        # 1. Sample and extend T_a
         q_rand = sample_conf()
-        # Find q_nearest
-        q_nearest = find_nearest(q_rand, T1)
-        # if Steer from q_nearest to q_rand is possible (collision check)
-        if steer_to(q_rand, q_nearest):
-            # then add q_rand to tree and list of nodes
-            q_nearest.children.append(q_rand)
-            q_rand.parent = q_nearest
-            T1.append(q_rand)
-        else:
-            continue
-
-        # find nearest for other tree
-        q_near_goal = find_nearest(q_rand, T2)
-        q_furthest = steer_to_until(q_rand, q_near_goal)
-        # if can connect then return path
-        # otherwise swap the trees
-        if np.array_equal(q_rand.conf, q_furthest.conf):
-            path1 = []
-            cur = q_rand
-            while cur:
-                path1.append(cur.conf)
-                cur = cur.parent
-            path2 = []
-            cur = q_near_goal
-            while cur:
-                path2.append(cur.conf)
-                cur = cur.parent
+        q_near_a = find_nearest(q_rand.conf, T_a)
+        q_new_a = steer_to_until(q_rand.conf, q_near_a)
+        
+        if q_new_a:
+            q_new_a.parent = q_near_a
+            T_a.append(q_new_a)
             
-            if np.array_equal(path1[-1], start_node.conf):
-                return path1[::-1] + path2
-            return path2[::-1] + path1
-        else:
-            temp_tree = T1
-            T1 = T2
-            T2 = temp_tree
+            # 2. Try to connect T_b to the node we just added to T_a
+            q_near_b = find_nearest(q_new_a.conf, T_b)
+            q_new_b = steer_to_until(q_new_a.conf, q_near_b)
+            
+            if q_new_b:
+                q_new_b.parent = q_near_b
+                T_b.append(q_new_b)
+                
+                # 3. Check if they met (Connection Successful)
+                if np.linalg.norm(q_new_b.conf - q_new_a.conf) < 1e-3:
+                    return reconstruct_full_path(q_new_a, q_new_b, swapped)
+
+        # 4. Swap trees so both grow equally
+        T_a, T_b = T_b, T_a
+        swapped = not swapped
+    
+    print("Planner failed to find path within max iterations.")
+    return None
+
+def reconstruct_full_path(node_a, node_b, swapped):
+    # Path from T_a root to connection point
+    path_a = []
+    curr = node_a
+    while curr:
+        path_a.append(curr.conf)
+        curr = curr.parent
+    path_a.reverse()
+    
+    # Path from T_b connection point to root
+    path_b = []
+    curr = node_b
+    while curr:
+        path_b.append(curr.conf)
+        curr = curr.parent
+        
+    if swapped:
+        # T_a is goal-rooted, T_b is start-rooted
+        return path_b[::-1] + path_a
+    else:
+        # T_a is start-rooted, T_b is goal-rooted
+        return path_a + path_b
