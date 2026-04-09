@@ -8,7 +8,8 @@ Features
 - LR scheduling: cosine annealing with warm restarts
 - Gradient clipping
 - Best-val-loss checkpointing + final save
-- TensorBoard-compatible metric logging (plain text fallback if not installed)
+- TensorBoard SummaryWriter logging (scalars, histograms, hparams)
+- JSONL text log as fallback / parallel record
 - Early stopping
 
 Location: src/model/train.py
@@ -16,6 +17,9 @@ Location: src/model/train.py
 Usage:
     python train.py --data-dir ../data/scenes --epochs 100 --batch-size 64
     python train.py --data-dir ../data/scenes --resume checkpoints/best.pt
+
+TensorBoard:
+    tensorboard --logdir src/model/runs
 """
 
 import os
@@ -29,8 +33,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-# from torch.cuda.amp import GradScaler, autocast
 from torch.amp import GradScaler, autocast
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    _TB_AVAILABLE = True
+except ImportError:
+    _TB_AVAILABLE = False
+    print("[Warning] tensorboard not installed — scalar logging will be JSONL only.\n"
+          "          Install with:  pip install tensorboard")
 
 # Allow running from src/model/ or src/
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -129,7 +140,14 @@ def load_checkpoint(path: str, model, optimizer=None, scheduler=None):
 # ──────────────────────────────────────────────
 
 def train_one_epoch(model, loader, optimizer, criterion,
-                    scaler, device, reg_lambda=0.001, grad_clip=1.0):
+                    scaler, device, reg_lambda=0.001, grad_clip=1.0,
+                    writer=None, global_step=0):
+    """Run one full training epoch.
+
+    Returns
+    -------
+    avg_loss, avg_acc, next_global_step
+    """
     model.train()
     total_loss  = 0.0
     total_acc   = 0.0
@@ -144,26 +162,35 @@ def train_one_epoch(model, loader, optimizer, criterion,
 
         with autocast(enabled=(scaler is not None)):
             logits, trans = model(pc, cfg)
-            loss = criterion(logits, labels.float())
-            reg  = feature_transform_regulariser(trans)
+            loss  = criterion(logits, labels.float())
+            reg   = feature_transform_regulariser(trans)
             total = loss + reg_lambda * reg
 
         if scaler is not None:
             scaler.scale(total).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             scaler.step(optimizer)
             scaler.update()
         else:
             total.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            grad_norm = nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
 
         total_loss += total.item()
         total_acc  += binary_accuracy(logits.detach(), labels)
         n_batches  += 1
 
-    return total_loss / n_batches, total_acc / n_batches
+        # ── Per-step scalars ──────────────────
+        if writer is not None:
+            writer.add_scalar("step/loss",      total.item(),    global_step)
+            writer.add_scalar("step/bce_loss",  loss.item(),     global_step)
+            writer.add_scalar("step/reg_loss",  reg.item(),      global_step)
+            writer.add_scalar("step/grad_norm", grad_norm.item(), global_step)
+
+        global_step += 1
+
+    return total_loss / n_batches, total_acc / n_batches, global_step
 
 
 def build_criterion(train_loader, device):
@@ -184,9 +211,9 @@ def main(args):
     # ── Paths ──────────────────────────────────
     ckpt_dir = Path(args.checkpoint_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    best_ckpt_path  = str(ckpt_dir / "best.pt")
+    best_ckpt_path   = str(ckpt_dir / "best.pt")
     final_model_path = str(ckpt_dir / "collision_model.pt")
-    log_path        = str(ckpt_dir / "train_log.jsonl")
+    log_path         = str(ckpt_dir / "train_log.jsonl")
 
     # ── Device ────────────────────────────────
     device = torch.device(
@@ -235,10 +262,45 @@ def main(args):
     # ── Loss ──────────────────────────────────
     criterion = build_criterion(train_loader, device)
 
+    # ── TensorBoard writer ────────────────────
+    writer = None
+    if _TB_AVAILABLE:
+        log_dir = Path(args.log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        writer = SummaryWriter(log_dir=str(log_dir))
+        print(f"TensorBoard logs → {log_dir}")
+        print(f"  Run:  tensorboard --logdir {log_dir.parent}\n")
+
+        # Log static model graph on a dummy batch
+        try:
+            dummy_pc  = torch.zeros(1, args.n_points, 3, device=device)
+            dummy_cfg = torch.zeros(1, 7,              device=device)
+            writer.add_graph(model, (dummy_pc, dummy_cfg))
+        except Exception:
+            pass  # graph logging is optional; don't crash if it fails
+
+        # Log hyperparameters (displayed in the HPARAMS tab)
+        writer.add_hparams(
+            hparam_dict={
+                "lr":          args.lr,
+                "batch_size":  args.batch_size,
+                "dropout":     args.dropout,
+                "reg_lambda":  args.reg_lambda,
+                "n_points":    args.n_points,
+                "epochs":      args.epochs,
+            },
+            metric_dict={
+                # placeholders — will be overwritten at the end with real values
+                "hparam/test_f1":  0.0,
+                "hparam/test_acc": 0.0,
+            },
+        )
+
     # ── Resume ────────────────────────────────
     start_epoch    = 0
     best_val_loss  = float("inf")
     patience_count = 0
+    global_step    = 0
 
     if args.resume and os.path.exists(args.resume):
         print(f"Resuming from {args.resume}")
@@ -246,6 +308,7 @@ def main(args):
             args.resume, model, optimizer, scheduler
         )
         start_epoch += 1
+        global_step  = start_epoch * len(train_loader)
 
     # ── Training loop ─────────────────────────
     print(f"\nTraining for {args.epochs} epochs …\n")
@@ -253,9 +316,12 @@ def main(args):
     for epoch in range(start_epoch, args.epochs):
         t0 = time.time()
 
-        train_loss, train_acc = train_one_epoch(
+        train_loss, train_acc, global_step = train_one_epoch(
             model, train_loader, optimizer, criterion,
-            scaler, device, reg_lambda=args.reg_lambda
+            scaler, device,
+            reg_lambda=args.reg_lambda,
+            writer=writer,
+            global_step=global_step,
         )
         val_loss, val_acc, val_prec, val_rec, val_f1 = evaluate(
             model, val_loader, criterion, device, reg_lambda=args.reg_lambda
@@ -273,7 +339,26 @@ def main(args):
             f"[{elapsed:.1f}s]"
         )
 
-        # Log to JSONL
+        # ── TensorBoard: epoch-level scalars ──
+        if writer is not None:
+            # Group train vs val under the same tag for easy overlay
+            writer.add_scalars("train/loss",     {"train": train_loss, "val": val_loss},     epoch + 1)
+            writer.add_scalars("train/accuracy", {"train": train_acc,  "val": val_acc},      epoch + 1)
+            writer.add_scalar ("train/val_precision", val_prec, epoch + 1)
+            writer.add_scalar ("train/val_recall",    val_rec,  epoch + 1)
+            writer.add_scalar ("train/val_f1",        val_f1,   epoch + 1)
+            writer.add_scalar ("train/lr",            lr_now,   epoch + 1)
+            writer.add_scalar ("train/epoch_time_s",  elapsed,  epoch + 1)
+
+            # Weight histograms every 10 epochs (slow to compute — skip otherwise)
+            if (epoch + 1) % 10 == 0:
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        writer.add_histogram(f"weights/{name}", param.data,       epoch + 1)
+                        if param.grad is not None:
+                            writer.add_histogram(f"grads/{name}", param.grad.data, epoch + 1)
+
+        # ── JSONL log ─────────────────────────
         with open(log_path, "a") as f:
             json.dump({
                 "epoch": epoch + 1,
@@ -284,13 +369,15 @@ def main(args):
             }, f)
             f.write("\n")
 
-        # Best checkpoint
+        # ── Best checkpoint ───────────────────
         if val_loss < best_val_loss:
             best_val_loss  = val_loss
             patience_count = 0
             save_checkpoint(best_ckpt_path, model, optimizer, scheduler,
                             epoch, best_val_loss, model_cfg)
             print(f"  ✓ New best val loss: {best_val_loss:.4f}")
+            if writer is not None:
+                writer.add_scalar("train/best_val_loss", best_val_loss, epoch + 1)
         else:
             patience_count += 1
             if patience_count >= args.patience:
@@ -313,24 +400,63 @@ def main(args):
         f"\n  F1        = {test_f1:.4f}"
     )
 
+    # ── TensorBoard: test scalars + hparams ──
+    if writer is not None:
+        writer.add_scalar("test/loss",      test_loss, 0)
+        writer.add_scalar("test/accuracy",  test_acc,  0)
+        writer.add_scalar("test/precision", test_prec, 0)
+        writer.add_scalar("test/recall",    test_rec,  0)
+        writer.add_scalar("test/f1",        test_f1,   0)
+
+        # Update the HPARAMS tab with real final metrics
+        writer.add_hparams(
+            hparam_dict={
+                "lr":         args.lr,
+                "batch_size": args.batch_size,
+                "dropout":    args.dropout,
+                "reg_lambda": args.reg_lambda,
+                "n_points":   args.n_points,
+                "epochs":     args.epochs,
+            },
+            metric_dict={
+                "hparam/test_f1":  test_f1,
+                "hparam/test_acc": test_acc,
+            },
+        )
+        writer.flush()
+        writer.close()
+        print(f"\nTensorBoard logs written to: {args.log_dir}")
+
     # ── Save inference model ──────────────────
     save_model_only(final_model_path, model, model_cfg)
-    print(f"\nAll done.  Inference model saved to: {final_model_path}")
+    print(f"All done.  Inference model saved to: {final_model_path}")
 
 
-if __name__ == "__main__":
+# ──────────────────────────────────────────────
+# CLI
+# ──────────────────────────────────────────────
+
+def get_args():
     p = argparse.ArgumentParser(description="Train PointNet collision detector")
-    p.add_argument("--data-dir",        default="../data/scenes",   help="Path to scenes directory (absolute or relative to this script)")
+    p.add_argument("--data-dir",        default="../data/scenes",
+                   help="Path to scenes directory (absolute or relative to this script)")
     p.add_argument("--epochs",          type=int,   default=100)
     p.add_argument("--batch-size",      type=int,   default=64)
     p.add_argument("--n-points",        type=int,   default=2048)
     p.add_argument("--lr",              type=float, default=1e-3)
     p.add_argument("--dropout",         type=float, default=0.3)
-    p.add_argument("--reg-lambda",      type=float, default=0.001,  help="Feature-transform regularisation weight")
-    p.add_argument("--patience",        type=int,   default=15,     help="Early-stopping patience (epochs)")
+    p.add_argument("--reg-lambda",      type=float, default=0.001,
+                   help="Feature-transform regularisation weight")
+    p.add_argument("--patience",        type=int,   default=15,
+                   help="Early-stopping patience (epochs)")
     p.add_argument("--num-workers",     type=int,   default=4)
     p.add_argument("--checkpoint-dir",  default="checkpoints")
-    p.add_argument("--resume",          default=None,               help="Path to checkpoint to resume from")
-    args = p.parse_args()
+    p.add_argument("--log-dir",         default="runs/collision_detector",
+                   help="TensorBoard log directory")
+    p.add_argument("--resume",          default=None,
+                   help="Path to checkpoint to resume from")
+    return p.parse_args()
 
-    main(args)
+
+if __name__ == "__main__":
+    main(get_args())
