@@ -336,7 +336,8 @@ def main(args):
             f"train_loss={train_loss:.4f}  train_acc={train_acc:.4f}  "
             f"val_loss={val_loss:.4f}  val_acc={val_acc:.4f}  "
             f"val_f1={val_f1:.4f}  lr={lr_now:.2e}  "
-            f"[{elapsed:.1f}s]"
+            f"[{elapsed:.1f}s]",
+            flush=True
         )
 
         # ── TensorBoard: epoch-level scalars ──
