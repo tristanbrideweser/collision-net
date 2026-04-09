@@ -160,7 +160,7 @@ def train_one_epoch(model, loader, optimizer, criterion,
 
         optimizer.zero_grad()
 
-        with autocast(enabled=(scaler is not None)):
+        with autocast(device_type=device.type, enabled=(scaler is not None)):
             logits, trans = model(pc, cfg)
             loss  = criterion(logits, labels.float())
             reg   = feature_transform_regulariser(trans)
