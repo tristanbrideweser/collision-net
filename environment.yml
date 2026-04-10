@@ -13,4 +13,5 @@ dependencies:
     - numpy<2
     - open3d
     - trimesh
+    - tensorboard
     - -e .
