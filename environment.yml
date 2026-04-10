@@ -10,7 +10,7 @@ dependencies:
   - pip:
     - torch==2.1.1
     - pybullet
-    - numpy
+    - numpy<2
     - open3d
     - trimesh
     - -e .

@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler, autocast
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -160,7 +160,7 @@ def train_one_epoch(model, loader, optimizer, criterion,
 
         optimizer.zero_grad()
 
-        with autocast(device_type=device.type, enabled=(scaler is not None)):
+        with autocast(enabled=(scaler is not None)):
             logits, trans = model(pc, cfg)
             loss  = criterion(logits, labels.float())
             reg   = feature_transform_regulariser(trans)
