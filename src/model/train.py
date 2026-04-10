@@ -34,6 +34,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingWarmRestarts, SequentialLR
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -252,9 +253,22 @@ def main(args):
 
     # ── Optimiser ─────────────────────────────
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        optimizer, T_0=max(1, args.epochs // 3), T_mult=1, eta_min=1e-6
+    # scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    #     optimizer, T_0=max(1, args.epochs // 3), T_mult=1, eta_min=1e-6
+    # )
+    warmup = LinearLR(
+        optimizer,
+        start_factor=0.1,   # start at lr * 0.1
+        end_factor=1.0,
+        total_iters=5,      # ramp over 5 epochs
     )
+    cosine = CosineAnnealingWarmRestarts(
+        optimizer,
+        T_0=max(1, (args.epochs - 5) // 3),
+        T_mult=1,
+        eta_min=1e-6,
+    )
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[5])
 
     # Mixed precision (CUDA only)
     scaler = GradScaler() if device.type == "cuda" else None
