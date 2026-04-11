@@ -1,0 +1,106 @@
+# ============================================================
+# config.yaml — Configuration for collision detection pipeline
+# ============================================================
+#
+# Usage:
+#   Data generation:  python generate_dataset.py --config ../config.yaml
+#   Training:         python train.py --config ../config.yaml
+#
+# ============================================================
+
+# ------------------------------------------------------------
+# Data Generation (generate_dataset.py)
+# ------------------------------------------------------------
+data:
+  # Input
+  pkl_file: "../envs/hybrid_solvable_problems.pkl"
+  scene_types:
+    - tabletop
+    - cubby
+    - merged_cubby
+    - dresser
+  categories:
+    - task_oriented
+    - neutral_start
+    - neutral_goal
+  max_scenes: null  # null = use all scenes, or set integer limit
+
+  # Sampling
+  samples_per_scene: 2000
+  n_points: 2048  # points per obstacle point cloud
+
+  # Output
+  output_dir: "../scenes"
+
+  # Splits
+  train_ratio: 0.8
+  val_ratio: 0.1
+  # test_ratio is implicit: 1 - train_ratio - val_ratio
+
+  # Reproducibility
+  seed: 42
+
+# ------------------------------------------------------------
+# Model Architecture (pointnet.py)
+# ------------------------------------------------------------
+model:
+  n_points: 2048
+  config_dim: 7  # Panda has 7 joints
+  pc_feature_dim: 1024
+  config_feature_dim: 128
+  use_tnet: true
+  dropout: 0.3
+
+# ------------------------------------------------------------
+# Training (train.py)
+# ------------------------------------------------------------
+training:
+  # Data
+  data_dir: "../data/scenes"
+  batch_size: 64
+  num_workers: 4
+  augment_train: true
+  normalize_pc: true
+
+  # Optimization
+  epochs: 100
+  lr: 0.001
+  weight_decay: 0.0001
+  scheduler: "cosine"  # cosine, plateau, none
+
+  # Loss
+  collision_weight: 1.0  # increase if dataset is imbalanced
+  reg_weight: 0.001      # feature transform regularization
+
+  # Checkpoints
+  model_dir: "./checkpoints"
+  save_every: 10  # save checkpoint every N epochs
+
+  # Reproducibility
+  seed: 42
+
+# ------------------------------------------------------------
+# Evaluation
+# ------------------------------------------------------------
+evaluation:
+  checkpoint: "./checkpoints/best_model.pt"
+  batch_size: 128
+  threshold: 0.5  # collision probability threshold
+
+  # Metrics to compute
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - confusion_matrix
+
+# ------------------------------------------------------------
+# Logging
+# ------------------------------------------------------------
+logging:
+  level: "INFO"
+  log_dir: "./logs"
+  tensorboard: true
+  wandb: false
+  wandb_project: "collision-detection"
