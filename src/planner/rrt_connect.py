@@ -1,6 +1,29 @@
 import numpy as np
 import random
 from src.planner.collision_detector import JOINT_LIMITS, in_collision
+from nn_collision_detector import NeuralCollisionChecker
+
+
+checker = NeuralCollisionChecker(
+    scene_point_cloud=np.random.default_rng(0).uniform(-1, 1, (2048, 3)).astype(np.float32),
+)
+
+def is_in_collision(q: list) -> bool:
+    return checker.in_collision(q)
+
+# ── batch-check a whole interpolated edge at once (recommended) ─
+def edge_in_collision(q_start: np.ndarray, q_end: np.ndarray, n_steps: int) -> bool:
+    waypoints = np.linspace(q_start, q_end, n_steps) 
+    return checker.batch_in_collision(waypoints).any()
+
+def farthest_free(q_start: np.ndarray, q_end: np.ndarray, n_steps: int) -> bool:
+    waypoints = np.linspace(q_start, q_end, n_steps)
+    collisions = checker.batch_in_collision(waypoints)
+    if not collisions.any():
+        return q_end
+    position = collisions.argmax()
+    return waypoints[position - 1]
+
 
 # Step size of linear interpolation during collision checking
 STEP_SIZE = 0.05
@@ -28,18 +51,22 @@ def find_nearest(rand_node: RRT_Node, node_list: list[RRT_Node]) -> RRT_Node:
     dist = [np.linalg.norm(rand_node.conf - node.conf) for node in node_list]
     return node_list[np.argmin(dist)]
 
-def steer_to(rand_node: RRT_Node, nearest_node: RRT_Node) -> bool:
+def steer_to(rand_node: RRT_Node, nearest_node: RRT_Node, use_nn_collision: bool) -> bool:
     direction = rand_node.conf - nearest_node.conf
     dist = np.linalg.norm(direction)
+    if use_nn_collision:
+        return not edge_in_collision(nearest_node.conf, rand_node.conf, dist/STEP_SIZE)
     for i in np.arange(STEP_SIZE, dist, STEP_SIZE):
         temp_conf = nearest_node.conf + direction * i / dist
         if in_collision(temp_conf):
             return False
     return not in_collision(rand_node.conf)
 
-def steer_to_until(rand_node: RRT_Node, nearest_node: RRT_Node) -> RRT_Node:
+def steer_to_until(rand_node: RRT_Node, nearest_node: RRT_Node, use_nn_collision: bool) -> RRT_Node:
     direction = rand_node.conf - nearest_node.conf
     dist = np.linalg.norm(direction)
+    if use_nn_collision:
+        return farthest_free(nearest_node.conf, rand_node.conf, dist/STEP_SIZE)
     prev = nearest_node.conf
     for i in np.arange(STEP_SIZE, dist, STEP_SIZE):
         temp_conf = nearest_node.conf + direction * i / dist
@@ -76,7 +103,7 @@ def path_smoothing(path: list[np.ndarray]) -> list[np.ndarray]:
         #     break
     return path
 
-def RRTConnect(start_conf, goal_conf) -> list[np.ndarray]:
+def RRTConnect(start_conf, goal_conf, use_nn_collision) -> list[np.ndarray]:
     start_node = RRT_Node(start_conf)
     goal_node = RRT_Node(goal_conf)
     T1: list[RRT_Node] = [start_node]
@@ -88,7 +115,7 @@ def RRTConnect(start_conf, goal_conf) -> list[np.ndarray]:
         # Find q_nearest
         q_nearest = find_nearest(q_rand, T1)
         # if Steer from q_nearest to q_rand is possible (collision check)
-        if steer_to(q_rand, q_nearest):
+        if steer_to(q_rand, q_nearest, use_nn_collision):
             # then add q_rand to tree and list of nodes
             q_nearest.children.append(q_rand)
             q_rand.parent = q_nearest

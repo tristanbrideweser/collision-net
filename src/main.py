@@ -27,8 +27,11 @@ def main(args):
     goal_pos = [1.1, -0.4, 0.75]
     goal = get_goal_config(panda_id=panda_id, target_pos=goal_pos)
 
+    # CHANGE HERE
+    use_nn_collision = False
+
     print("Planning path...")
-    path = RRTConnect(start, goal)
+    path = RRTConnect(start, goal, use_nn_collision)
 
     if path:
         print(f"path found with {len(path)} nodes")
