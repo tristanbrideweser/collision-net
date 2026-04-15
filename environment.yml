@@ -8,9 +8,10 @@ dependencies:
   - setuptools=59.5.0
   - wheel=0.37.1
   - pip:
+    - torch==2.1.1
     - pybullet
-    - torch
-    - numpy
+    - numpy<2
     - open3d
     - trimesh
+    - tensorboard
     - -e .
