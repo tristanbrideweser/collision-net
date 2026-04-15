@@ -83,3 +83,5 @@ python tests/test_clutter.py
 ```
 
 *Note: These scripts will open a PyBullet GUI window.*
+
+`Tristan Brideweser & Dylan Li`
