@@ -48,13 +48,6 @@ class MultiHeadAttn:
         self.Wv = nn.Linear(d_model, d_model)
 
         self.Wo = nn.Linear(d_model, d_model)
-
-    def create_causal_mask(self, seq_len):
-        mask = np.ones((seq_len, seq_len))
-        mask = np.tril(mask)
-        mask = np.where(mask==0, -np.inf, 0)
-
-        return torch.tensor(mask, dtype=torch.float32)
     
     def scaled_dot_product_attn(self, Q, K, V, mask=None):
         d_k = self.head_dim
@@ -92,10 +85,6 @@ class MultiHeadAttn:
         seq_len = query.shape[1]
 
         res = query
-
-        mask = self.create_causal_mask(seq_len)
-        mask = mask.unsqueeze(0).unsqueeze(0)
-        mask = mask.to(query.device)
 
         Q = self.Wq(query)
         K = self.Wk(key)
