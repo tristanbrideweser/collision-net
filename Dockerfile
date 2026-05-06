@@ -1,26 +1,29 @@
-FROM python:3.10-slim
+# Start with the official PyTorch image (matching your version + CUDA)
+FROM pytorch/pytorch:2.1.1-cuda11.8-cudnn8-runtime
 
+# Prevent interactive prompts blocking the build
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies required for PyBullet and 3D rendering
 RUN apt-get update && apt-get install -y \
-    libgl1-mesa-dev \
-    libosmesa6-dev \
-    freeglut3-dev \
-    libgles2-mesa-dev \
+    build-essential \
+    libgl1-mesa-glx \
     libglib2.0-0 \
-    libxrender1 \
-    libxext6 \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /appWORKING
+# Set up the working directory
+WORKDIR /workspace/collisionnet
 
-COPY environment.yml .
-RUN conda env create -f environment.yml
+# Copy ONLY the dependency files first. 
+# This caches the heavy pip installs unless these specific files change.
+COPY requirements.txt pyproject.toml ./
 
-COPY . .
+# Sync your specific build tools to avoid the ROS 2 conflicts
+RUN pip install --upgrade pip==21.3.1 setuptools==59.5.0 wheel==0.37.1
 
-ENV LIBGL_ALWAYS_SOFTWARE=1
-ENV PYTHONUNBUFFERED=1
+# Install the project dependencies
+RUN pip install -r requirements.txt
 
-CMD ["python", "main.py"]
-
-
-
+# Set the default command to open a bash shell
+CMD ["bash"]
