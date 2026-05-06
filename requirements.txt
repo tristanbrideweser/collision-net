@@ -1,7 +1,7 @@
-pip==21.3.1
-setuptools==59.5.0
-wheel==0.37.1
-torch==2.1.1
+pip
+setuptools
+wheel
+torch
 pybullet
 numpy<2
 open3d
