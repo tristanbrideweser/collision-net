@@ -1,48 +1,28 @@
 #!/bin/bash
 # setup_scholar_env.sh
 
-# Exit immediately if a command exits with a non-zero status
 set -e
 
-echo "🧹 Purging existing modules to prevent conflicts..."
+echo "🧹 Purging modules and loading Anaconda..."
 module purge
+module load anaconda/2024.02-py311
 
-echo "🐍 Loading standard Python module..."
-# Purdue RCAC typically uses anaconda or standard python modules. 
-# We load the default python here, which is usually 3.9+ 
-module load python
-
-# Move the pip cache to scratch so it doesn't blow up your home directory quota
+# Redirect pip cache to scratch to protect your home quota
 export PIP_CACHE_DIR=$RCAC_SCRATCH/.cache/pip
 mkdir -p $PIP_CACHE_DIR
 
-echo "📦 Creating virtual environment 'venv'..."
-# If venv already exists, this won't overwrite it, but we can be safe
-if [ ! -d "venv" ]; then
-    python -m venv venv
-else
-    echo "⚠️ 'venv' directory already exists. Skipping creation."
-fi
-
-echo "🔌 Activating environment..."
+echo "📦 Creating venv in Scratch space..."
+# Create the virtual environment using the loaded Anaconda python
+python -m venv venv
 source venv/bin/activate
 
-echo "⬆️ Upgrading pip..."
+echo "⬆️ Upgrading pip and installing high-performance dependencies..."
 pip install --upgrade pip
 
-echo "🔨 Installing CollisionNet dependencies..."
-# Core PyTorch (Pip usually pulls the correct CUDA binaries automatically)
-pip install torch torchvision torchaudio
+# Install PyTorch with CUDA 11.8 support for the Scholar GPUs
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 
-# Simulation and Geometry
-pip install pybullet open3d trimesh
+# Install simulation, geometry, and logging tools
+pip install pybullet numpy tqdm tensorboard scipy
 
-# Utilities and Logging
-pip install tensorboard tqdm pyyaml numpy scipy scikit-learn
-
-echo ""
-echo "======================================================================"
-echo "✅ Scholar cluster environment setup complete!"
-echo "   To activate this environment in the future, just run:"
-echo "   source venv/bin/activate"
-echo "======================================================================"
+echo "✅ Environment successfully mirrored to Scholar!"
