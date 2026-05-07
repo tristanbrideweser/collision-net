@@ -1,103 +1,73 @@
 # src/model/collisionnet.py
-import torch 
+import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from encoders import pointnet as PointNetEncoder
+# Import our three Lego blocks
+from src.model.encoders.kinematic_mlp import CartesianConfigEncoder
+from src.model.encoders.pointnet import PointNetEncoder
+from src.model.fusion.cross_attn import SpatialCrossAttention
 
 class CollisionNet(nn.Module):
-    """PointNet collision detector for a 7-DOF manipulator.
-
-    Inputs
-    ------
-    point_cloud : (B, N, 3)   obstacle surface points (normalised to unit sphere)
-    config      : (B, 7)      joint angles normalised to [-1, 1]
-
-    Output
-    ------
-    logit       : (B,)        raw (un-sigmoided) collision score
-                              positive  → collision,  negative → free
     """
-
-    def __init__(
-        self,
-        pc_feat_dim:   int   = 1024,
-        cfg_hidden_dim: int  = 256,
-        fuse_hidden_dim: int = 512,
-        dropout:        float = 0.3,
-        use_input_tnet: bool  = True,
-        use_feat_tnet:  bool  = True,
-    ):
+    The master model. Fuses kinematic keypoints and scene point clouds 
+    to predict collision probabilities.
+    """
+    def __init__(self, embed_dim=1024, num_heads=8):
         super().__init__()
-        self.encoder = PointNetEncoder(
-            out_dim=pc_feat_dim,
-            use_input_tnet=use_input_tnet,
-            use_feat_tnet=use_feat_tnet,
-        )
-
-        # Config encoder: 7 → cfg_hidden_dim
-        self.config_encoder = nn.Sequential(
-            nn.Linear(7, 128),
-            nn.BatchNorm1d(128),
-            nn.ReLU(),
-            nn.Linear(128, cfg_hidden_dim),
-            nn.BatchNorm1d(cfg_hidden_dim),
-            nn.ReLU(),
-        )
-
-        fuse_in = pc_feat_dim + cfg_hidden_dim
-
-        # Fusion classifier: concatenated features → logit
+        
+        # 1. The Encoders
+        self.robot_encoder = CartesianConfigEncoder(out_dim=embed_dim)
+        self.scene_encoder = PointNetEncoder(out_dim=embed_dim)
+        
+        # 2. The Fusion Bridge
+        self.cross_attn = SpatialCrossAttention(embed_dim=embed_dim, num_heads=num_heads)
+        
+        # 3. The Collision Classifier (applied per-keypoint)
         self.classifier = nn.Sequential(
-            nn.Linear(fuse_in,         fuse_hidden_dim), nn.BatchNorm1d(fuse_hidden_dim), nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(fuse_hidden_dim, fuse_hidden_dim // 2), nn.BatchNorm1d(fuse_hidden_dim // 2), nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(fuse_hidden_dim // 2, 1),
+            nn.Linear(embed_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(512, 256),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(256, 1) # Outputs a single logit per keypoint
         )
 
-    def forward(self, point_cloud: torch.Tensor, config: torch.Tensor):
-        pc_feat,   trans_feat = self.encoder(point_cloud)    # (B, pc_feat_dim)
-        cfg_feat              = self.config_encoder(config)  # (B, cfg_hidden_dim)
-        fused                 = torch.cat([pc_feat, cfg_feat], dim=1)
-        logit                 = self.classifier(fused).squeeze(1)  # (B,)
-        return logit, trans_feat
-
-
-# ──────────────────────────────────────────────
-# Regularisation loss (PointNet paper)
-# ──────────────────────────────────────────────
-
-def feature_transform_regulariser(trans: torch.Tensor) -> torch.Tensor:
-    """Penalise deviation of the 64×64 feature transform from orthogonality.
-
-    Loss = ||I - A·Aᵀ||²_F  (mean over batch)
-    """
-    if trans is None:
-        return torch.tensor(0.0)
-    B, k, _ = trans.shape
-    I   = torch.eye(k, device=trans.device).unsqueeze(0).expand(B, -1, -1)
-    AAt = torch.bmm(trans, trans.transpose(1, 2))
-    return F.mse_loss(AAt, I)
-
-
-# ──────────────────────────────────────────────
-# Convenience: model info
-# ──────────────────────────────────────────────
-
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-
-if __name__ == "__main__":
-    B, N = 4, 2048
-    pc  = torch.randn(B, N, 3)
-    cfg = torch.randn(B, 7)
-
-    model = CollisionNet()
-    logit, tf = model(pc, cfg)
-
-    print(f"Output shape : {logit.shape}")        # (4,)
-    print(f"Params       : {count_parameters(model):,}")
-    reg = feature_transform_regulariser(tf)
-    print(f"Reg loss     : {reg.item():.4f}")
+    def forward(self, robot_keypoints, scene_points):
+        """
+        Args:
+            robot_keypoints: (B, K, 3) 
+            scene_points:    (B, N, 3)
+        Returns:
+            logits:       (B, 1) raw collision score (pass through Sigmoid later)
+            attn_weights: (B, H, K, N) for the heatmap visualization
+            trans_feat:   (B, 64, 64) for PointNet regularization loss
+        """
+        B, K, _ = robot_keypoints.shape
+        
+        # 1. Encode
+        robot_feat = self.robot_encoder(robot_keypoints)            # (B, K, D)
+        scene_feat, trans_feat = self.scene_encoder(scene_points)   # (B, N, D)
+        
+        # 2. Fuse
+        fused_feat, attn_weights = self.cross_attn(
+            robot_queries=robot_feat, 
+            scene_keys=scene_feat, 
+            scene_values=scene_feat
+        ) # fused_feat is (B, K, D)
+        
+        # 3. Classify each keypoint independently
+        # Reshape to (B * K, D) for the Linear layers
+        flat_feat = fused_feat.view(-1, fused_feat.size(-1))
+        kp_logits = self.classifier(flat_feat)
+        
+        # Reshape back to (B, K, 1)
+        kp_logits = kp_logits.view(B, K, 1)
+        
+        # 4. Global Max Pool over the Keypoint dimension
+        # If any keypoint is in collision, the max logit will be high.
+        global_logits = kp_logits.max(dim=1)[0] # (B, 1)
+        
+        return global_logits, attn_weights, trans_feat

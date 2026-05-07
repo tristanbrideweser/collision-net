@@ -1,22 +1,12 @@
+# src/model/dataset.py
 """
-dataset.py — PyTorch Dataset for collision detection with PointNet.
+dataset.py — PyTorch Dataset for Cartesian Cross-Attention CollisionNet.
 
 Loads the output from generate_dataset.py and prepares batches for training.
 Each sample consists of:
-    - Obstacle point cloud (N, 3) from scene file
-    - Robot configuration (7,) normalized to [-1, 1]
-    - Binary collision label
-
-Location: src/model/dataset.py
-
-Usage:
-    from dataset import CollisionDataset, get_dataloaders
-    
-    train_loader, val_loader, test_loader = get_dataloaders(
-        data_dir="../data/scenes",
-        batch_size=64,
-        num_workers=4,
-    )
+    - Obstacle point cloud (N, 3)
+    - Robot Cartesian keypoints (9, 3)
+    - Binary collision label (1,)
 """
 
 import os
@@ -24,20 +14,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
-
 class CollisionDataset(Dataset):
-    """Dataset for collision detection training.
-    
-    Loads pre-generated data from generate_dataset.py output.
-    
-    Args:
-        data_dir: Path to scenes directory containing train/val/test.npz and scenes/
-        split: One of 'train', 'val', 'test'
-        n_points: Number of points to sample from point cloud (default: 2048)
-        augment: Whether to apply data augmentation (only for training)
-        normalize_pc: Whether to normalize point clouds to unit sphere
-    """
-    
     def __init__(
         self,
         data_dir: str,
@@ -59,13 +36,11 @@ class CollisionDataset(Dataset):
         
         data = np.load(split_file)
         self.scene_ids = data["scene_ids"]
-        self.configs = data["configs"]
+        self.configs = data["configs"] # Now expected to be (Samples, 9, 3)
         self.labels = data["labels"]
         
         # Cache for loaded scene point clouds
         self._scene_cache = {}
-        
-        # Preload all unique scenes (memory permitting)
         self._preload_scenes()
         
         print(f"Loaded {split} split: {len(self)} samples, "
@@ -74,74 +49,73 @@ class CollisionDataset(Dataset):
               f"({self.labels.mean()*100:.1f}%)")
     
     def _preload_scenes(self):
-        """Preload all scene point clouds into memory."""
         unique_scenes = np.unique(self.scene_ids)
         scenes_subdir = os.path.join(self.data_dir, "scenes")
-        
         for scene_id in unique_scenes:
             scene_file = os.path.join(scenes_subdir, f"scene_{scene_id:04d}.npz")
             if os.path.exists(scene_file):
-                scene_data = np.load(scene_file)
-                self._scene_cache[scene_id] = scene_data["point_cloud"]
+                self._scene_cache[scene_id] = np.load(scene_file)["point_cloud"]
     
     def __len__(self):
         return len(self.labels)
     
     def __getitem__(self, idx):
         scene_id = self.scene_ids[idx]
-        config = self.configs[idx].copy()
+        robot_keypoints = self.configs[idx].copy() # (9, 3)
         label = self.labels[idx]
         
-        # Get point cloud from cache
         if scene_id in self._scene_cache:
             point_cloud = self._scene_cache[scene_id].copy()
         else:
-            # Fallback: load from disk
             scene_file = os.path.join(self.data_dir, "scenes", f"scene_{scene_id:04d}.npz")
             point_cloud = np.load(scene_file)["point_cloud"].copy()
         
-        # Resample to fixed number of points
+        # 1. Resample scene
         point_cloud = self._resample(point_cloud)
         
-        # Normalize point cloud
+        # 2. Unified Spatial Normalization
         if self.normalize_pc:
-            point_cloud = self._normalize_point_cloud(point_cloud)
+            point_cloud, robot_keypoints = self._normalize_scene(point_cloud, robot_keypoints)
         
-        # Data augmentation
+        # 3. Unified Data Augmentation
         if self.augment:
-            point_cloud = self._augment_point_cloud(point_cloud)
+            point_cloud, robot_keypoints = self._augment_scene(point_cloud, robot_keypoints)
         
         return {
-            "point_cloud": torch.from_numpy(point_cloud).float(),  # (N, 3)
-            "config": torch.from_numpy(config).float(),            # (7,)
-            "label": torch.tensor(label, dtype=torch.long),        # scalar
+            "point_cloud": torch.from_numpy(point_cloud).float(),       # (N, 3)
+            "robot_keypoints": torch.from_numpy(robot_keypoints).float(), # (9, 3)
+            "label": torch.tensor([label], dtype=torch.float32),        # (1,) for BCEWithLogitsLoss
             "scene_id": scene_id,
         }
     
     def _resample(self, points: np.ndarray) -> np.ndarray:
-        """Resample point cloud to fixed size."""
         n = len(points)
         if n == 0:
             return np.zeros((self.n_points, 3), dtype=np.float32)
-        
         if n >= self.n_points:
             indices = np.random.choice(n, self.n_points, replace=False)
         else:
             indices = np.random.choice(n, self.n_points, replace=True)
-        
         return points[indices]
     
-    def _normalize_point_cloud(self, points: np.ndarray) -> np.ndarray:
-        """Center and scale point cloud to unit sphere."""
+    def _normalize_scene(self, points: np.ndarray, keypoints: np.ndarray):
+        """Center and scale BOTH point cloud and robot to unit sphere."""
         centroid = points.mean(axis=0)
+        
+        # Shift both
         points = points - centroid
+        keypoints = keypoints - centroid
+        
+        # Scale both
         max_dist = np.max(np.linalg.norm(points, axis=1))
         if max_dist > 0:
             points = points / max_dist
-        return points
+            keypoints = keypoints / max_dist
+            
+        return points, keypoints
     
-    def _augment_point_cloud(self, points: np.ndarray) -> np.ndarray:
-        """Apply random augmentations to point cloud."""
+    def _augment_scene(self, points: np.ndarray, keypoints: np.ndarray):
+        """Apply random augmentations to both geometries to preserve spatial relations."""
         # Random rotation around z-axis
         if np.random.rand() > 0.5:
             theta = np.random.uniform(0, 2 * np.pi)
@@ -151,19 +125,20 @@ class CollisionDataset(Dataset):
                 [0, 0, 1]
             ])
             points = points @ rot.T
+            keypoints = keypoints @ rot.T
         
-        # Random jitter
+        # Random scale
+        if np.random.rand() > 0.5:
+            scale = np.random.uniform(0.9, 1.1)
+            points = points * scale
+            keypoints = keypoints * scale
+            
+        # Random jitter (Apply ONLY to scene to simulate depth sensor noise)
         if np.random.rand() > 0.5:
             noise = np.random.normal(0, 0.01, points.shape)
             points = points + noise
         
-        # Random scaling
-        if np.random.rand() > 0.5:
-            scale = np.random.uniform(0.9, 1.1)
-            points = points * scale
-        
-        return points.astype(np.float32)
-
+        return points.astype(np.float32), keypoints.astype(np.float32)
 
 def get_dataloaders(
     data_dir: str,
@@ -173,19 +148,6 @@ def get_dataloaders(
     augment_train: bool = True,
     normalize_pc: bool = True,
 ):
-    """Create train, val, test dataloaders.
-    
-    Args:
-        data_dir: Path to scenes directory
-        batch_size: Batch size for all loaders
-        n_points: Points per point cloud
-        num_workers: DataLoader workers
-        augment_train: Whether to augment training data
-        normalize_pc: Whether to normalize point clouds
-        
-    Returns:
-        train_loader, val_loader, test_loader
-    """
     train_ds = CollisionDataset(
         data_dir, split="train", n_points=n_points,
         augment=augment_train, normalize_pc=normalize_pc
@@ -214,40 +176,23 @@ def get_dataloaders(
     
     return train_loader, val_loader, test_loader
 
-
-def collate_fn(batch):
-    """Custom collate function (optional, for variable-size handling)."""
-    return {
-        "point_cloud": torch.stack([b["point_cloud"] for b in batch]),
-        "config": torch.stack([b["config"] for b in batch]),
-        "label": torch.stack([b["label"] for b in batch]),
-        "scene_id": [b["scene_id"] for b in batch],
-    }
-
-
 if __name__ == "__main__":
-    # Quick test
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default="../data/scenes")
+    parser.add_argument("--data-dir", default="../scenes")
     args = parser.parse_args()
     
-    # Resolve path relative to script
     script_dir = os.path.dirname(os.path.abspath(__file__))
     data_dir = os.path.normpath(os.path.join(script_dir, args.data_dir))
-    
-    print(f"Testing dataset from: {data_dir}")
     
     train_loader, val_loader, test_loader = get_dataloaders(
         data_dir=data_dir,
         batch_size=32,
-        num_workers=0,  # 0 for debugging
+        num_workers=0,
     )
     
-    # Check a batch
     batch = next(iter(train_loader))
     print(f"\nBatch shapes:")
-    print(f"  point_cloud: {batch['point_cloud'].shape}")  # (B, N, 3)
-    print(f"  config:      {batch['config'].shape}")       # (B, 7)
-    print(f"  label:       {batch['label'].shape}")        # (B,)
-    print(f"  labels:      {batch['label'].tolist()[:10]}...")
+    print(f"  point_cloud:     {batch['point_cloud'].shape}")
+    print(f"  robot_keypoints: {batch['robot_keypoints'].shape}")
+    print(f"  label:           {batch['label'].shape}")

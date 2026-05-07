@@ -1,111 +1,57 @@
+# src/model/fusion/attn.py
 import torch
 import torch.nn as nn
-import numpy as np
+import torch.nn.functional as F
+import math
 
-class AttnMLP:
+class SpatialCrossAttention(nn.Module):
     """
+    Computes Cross-Attention between Robot Keypoints (Queries) 
+    and Scene Points (Keys/Values) without causal masking.
     """
-    def __init__(self, d_model, hidden_dim, dropout=0.3):
+    def __init__(self, embed_dim=1024, num_heads=8):
         super().__init__()
-        self.d_model = d_model
-        self.hidden_dim = hidden_dim
-
-        # layer 1
-        self.fc1 = nn.Linear(d_model, hidden_dim)
-        self.act = nn.GeLU()
-        self.do1 = nn.Dropout(dropout)
-
-        # layer 2 
-        self.fc2 = nn.Linear(hidden_dim, d_model)
-        self.do2 = nn.Dropout(dropout)
-        self.layer_norm = nn.LayerNorm(d_model)
-
-    def forward(self, x):
-        """
-        """
-        res = x
-
-        output = self.fc1(x)
-        output = self.act(output)
-        output = self.do1(output)
-        output = self.fc2(output)
-        
-        output = output + res 
-
-        output = self.layer_norm(output)
-
-class MultiHeadAttn:
-    def __init__(
-            self, 
-            d_model,
-            num_heads,
-            dropout=0.3
-    ):
-        """
-        """
-        self.d_model = d_model
         self.num_heads = num_heads
-        self.dropout = dropout
+        self.head_dim = embed_dim // num_heads
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
 
-        self.head_dim = d_model // num_heads
+        self.q_proj = nn.Linear(embed_dim, embed_dim)
+        self.k_proj = nn.Linear(embed_dim, embed_dim)
+        self.v_proj = nn.Linear(embed_dim, embed_dim)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
 
-        self.Wq = nn.Linear(d_model, d_model)
-        self.Wk = nn.Linear(d_model, d_model)
-        self.Wv = nn.Linear(d_model, d_model)
-
-        self.Wo = nn.Linear(d_model, d_model)
-    
-    def scaled_dot_product_attn(self, Q, K, V):
+    def forward(self, robot_queries, scene_keys, scene_values):
         """
+        Args:
+            robot_queries: (B, K, D) features from the Kinematic MLP
+            scene_keys:    (B, N, D) features from the PointNet
+            scene_values:  (B, N, D) features from the PointNet
+            
+        Returns:
+            out: (B, K, D) context-aware robot features
+            attn_weights: (B, H, K, N) the raw heatmaps for visualization
         """
-        d_k = self.head_dim
+        B, K_pts, D = robot_queries.size()
+        _, N_pts, _ = scene_keys.size()
 
-        # compute attn
-        attn_scores = Q @ K.transpose(-2, -1) / torch.sqrt(torch.tensor(d_k, dtype=torch.float32))
+        # 1. Project and split into attention heads
+        # Shape becomes: (B, Num_Heads, Seq_Len, Head_Dim)
+        Q = self.q_proj(robot_queries).view(B, K_pts, self.num_heads, self.head_dim).transpose(1, 2)
+        K = self.k_proj(scene_keys).view(B, N_pts, self.num_heads, self.head_dim).transpose(1, 2)
+        V = self.v_proj(scene_values).view(B, N_pts, self.num_heads, self.head_dim).transpose(1, 2)
 
-        # softmax
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        attn_weights = self.attn_dropout(attn_weights)
-
-        # multiply by V
-        output = attn_weights @ V
-
-        return output, attn_weights
-    
-    def split_heads(self, x):
-        """
-        """
-        batch_size, seq_len, d_model = x.shape
+        # 2. Compute spatial attention scores (Dot product of Q and K)
+        # Shape: (B, Num_Heads, K_pts, N_pts)
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)
         
-        x = x.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        x = x.transpose(1, 2)
+        # CRITICAL: No causal masking! Every robot point sees every scene point.
+        attn_weights = F.softmax(scores, dim=-1)
 
-        return x
-    
-    def forward(self, query, key, value):
-        """
-        """
-        batch_size = query.shape[0]
-        seq_len = query.shape[1]
+        # 3. Apply attention weights to the Values
+        out = torch.matmul(attn_weights, V) # (B, Num_Heads, K_pts, Head_Dim)
+        
+        # 4. Concatenate heads back together and project
+        out = out.transpose(1, 2).contiguous().view(B, K_pts, D)
+        out = self.out_proj(out)
 
-        res = query
-
-        Q = self.Wq(query)
-        K = self.Wk(key)
-        V = self.Wv(value)
-
-        Q = self.split_heads(Q)
-        K = self.split_heads(K)
-        V = self.split_heads(V)
-
-        attn_output, attn_weights = self.scaled_dot_product_attn(Q, K, V)
-
-        attn_output= attn_output.transpose(1, 2)
-        attn_output = attn_output.contiguous().view(batch_size, -1, self.d_model)
-
-        output = self.Wo(attn_output)
-
-        output = output + res
-        output = self.layer_norm(output)
-
-        return output, attn_weights
+        return out, attn_weights

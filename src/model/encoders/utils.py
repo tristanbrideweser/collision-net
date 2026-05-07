@@ -1,5 +1,7 @@
+# src/model/encoders/utils.py
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class SharedMLP(nn.Module):
     """1-D convolution acting as a shared MLP across all points.
