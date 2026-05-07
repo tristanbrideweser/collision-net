@@ -8,6 +8,7 @@
 #SBATCH --time=04:00:00             # Strictly 4 hours as per cluster limits
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
+#SBATCH --account=scholar
 #SBATCH --partition=scholar-gpu     # <--- Updated partition name from your sinfo
 
 # 1. Load the Anaconda environment verified earlier
