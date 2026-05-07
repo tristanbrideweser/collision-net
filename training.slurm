@@ -11,6 +11,7 @@
 module purge
 module load anaconda/2024.02-py311
 source venv/bin/activate
+export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 # Determine GPUs dynamically (should be 1)
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F ',' '{print NF}')
