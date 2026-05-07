@@ -1,28 +1,25 @@
 #!/bin/bash
 #SBATCH --job-name=collisionnet_ddp
-#SBATCH --account=scholar
-#SBATCH --partition=scholar-gpu
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gres=gpu:1                # Requesting exactly 1 GPU for maximum availability
-#SBATCH --cpus-per-task=8           # 8 cores is plenty for one GPU
-#SBATCH --mem=32G                   # 32GB is safe and respectful of the node
-#SBATCH --time=04:00:00             
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
+#SBATCH --partition=scholar-gpu
+#SBATCH --account=gpu               # Using the account verified in your hw3 script
+#SBATCH --gpus-per-node=1           # Using the specific flag that worked for you
+#SBATCH --time=04:00:00
 
-# 1. Environment Setup
+# 1. Environment Setup (RCAC Style)
 module purge
 module load anaconda/2024.02-py311
 source venv/bin/activate
 
-# Determine GPUs dynamically
+# Determine GPUs dynamically (should be 1)
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F ',' '{print NF}')
-echo "Igniting torchrun on $NUM_GPUS GPUs..."
+echo "Igniting torchrun on $NUM_GPUS GPU(s)..."
 
 cd src
 
 # 2. Launch DDP Training
+# Even on 1 GPU, torchrun ensures the environment is set up for the auto-resume logic
 srun torchrun \
     --standalone \
     --nnodes=1 \
