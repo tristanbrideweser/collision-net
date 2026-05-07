@@ -3,10 +3,10 @@
 #SBATCH --account=scholar
 #SBATCH --partition=scholar-gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1         # Keep as 1 for torchrun
-#SBATCH --gres=gpu:2                # Request 2 GPUs per node
-#SBATCH --cpus-per-task=16          # 8 cores per GPU
-#SBATCH --mem=64G                   # 64GB is plenty for this data
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1                # Requesting exactly 1 GPU for maximum availability
+#SBATCH --cpus-per-task=8           # 8 cores is plenty for one GPU
+#SBATCH --mem=32G                   # 32GB is safe and respectful of the node
 #SBATCH --time=04:00:00             
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
