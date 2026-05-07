@@ -1,6 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=collisionnet_4gpu
 #SBATCH --partition=scholar-gpu
+#SBATCH --account=gpu
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=4
 #SBATCH --ntasks-per-node=4
