@@ -11,7 +11,9 @@
 #SBATCH --partition=gpu             # Target the GPU partition
 
 # Activate environment
-source ~/Desktop/sp2026/collisionnet/venv/bin/activate
+module purge
+module load anaconda/2024.02-py311
+source venv/bin/activate
 
 # Determine GPUs dynamically
 NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F ',' '{print NF}')
