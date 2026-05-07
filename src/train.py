@@ -124,6 +124,8 @@ def train():
             # --- AMP BACKWARD PASS ---
             scaler.scale(loss).backward()
             scaler.step(optimizer)
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.update()
 
             total_train_loss += loss.item()
