@@ -27,13 +27,13 @@ def feature_transform_reg_loss(trans_feat):
 
 def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", type=str, default="../data/scenes")
+    parser.add_argument("--data-dir", type=str, default="./data/scenes")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128) 
-    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--lr", type=float, default=1e-4) # Lowered for stability
     parser.add_argument("--reg-weight", type=float, default=0.001)
-    parser.add_argument("--log-dir", type=str, default="../runs/collisionnet_ddp")
-    parser.add_argument("--save-dir", type=str, default="../checkpoints")
+    parser.add_argument("--log-dir", type=str, default="./runs/collisionnet_ddp")
+    parser.add_argument("--save-dir", type=str, default="./checkpoints")
     parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
 
@@ -46,12 +46,14 @@ def train():
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     
+    # Ensure paths are absolute and within the repo
     save_path = os.path.abspath(args.save_dir)
+    log_path = os.path.abspath(args.log_dir)
     
     if global_rank == 0:
-        print(f"--- Firing up DDP with AMP across {world_size} GPUs ---")
+        print(f"--- Firing up DDP with Modern AMP (Torch 2.11+) ---")
         os.makedirs(save_path, exist_ok=True)
-        writer = SummaryWriter(args.log_dir)
+        writer = SummaryWriter(log_path)
     else:
         writer = None
 
@@ -77,10 +79,10 @@ def train():
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-    # --- MIXED PRECISION SCALER ---
-    scaler = torch.cuda.amp.GradScaler()
+    # --- MODERN AMP SCALER ---
+    scaler = torch.amp.GradScaler('cuda')
 
-    # 4. Auto-Resume
+    # 4. Auto-Resume Logic
     start_epoch = 1
     best_val_loss = float('inf')
     latest_ckpt_path = os.path.join(save_path, "collisionnet_latest.pth")
@@ -105,6 +107,7 @@ def train():
         model.train()
         total_train_loss, train_correct, train_total = 0.0, 0, 0
         
+        # tqdm refresh set to 60s for cluster log friendliness
         pbar = tqdm(train_loader, desc=f"Ep {epoch} [Train]", mininterval=60, ascii=True) if global_rank == 0 else train_loader
         
         for i, batch in enumerate(pbar):
@@ -114,27 +117,32 @@ def train():
 
             optimizer.zero_grad()
 
-            # --- AMP FORWARD PASS ---
-            with torch.cuda.amp.autocast():
+            # --- MODERN AMP FORWARD ---
+            with torch.amp.autocast('cuda'):
                 logits, _, trans_feat = model(robot_pts, scene_pts)
                 bce_loss = criterion(logits, labels)
                 reg_loss = feature_transform_reg_loss(trans_feat)
                 loss = bce_loss + (args.reg_weight * reg_loss)
             
-            # --- AMP BACKWARD PASS ---
+            # --- STABILIZED BACKWARD ---
             scaler.scale(loss).backward()
-            scaler.step(optimizer)
-
+            
+            # Unscale before clipping to ensure math is in FP32 range
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
+            scaler.step(optimizer)
             scaler.update()
 
+            # Metrics
             total_train_loss += loss.item()
             preds = (torch.sigmoid(logits) > 0.5).float()
             train_correct += (preds == labels).sum().item()
             train_total += labels.size(0)
 
+            # Safety Checkpoint (every 500 batches)
             if global_rank == 0 and i % 500 == 0:
-                pbar.set_postfix({"loss": f"{loss.item():.4f}"})
+                if i > 0: pbar.set_postfix({"loss": f"{loss.item():.4f}"})
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.module.state_dict(),
@@ -155,11 +163,11 @@ def train():
                 scene_pts = batch["point_cloud"].to(device)
                 labels = batch["label"].to(device)
 
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda'):
                     logits, _, trans_feat = model(robot_pts, scene_pts)
-                    loss = criterion(logits, labels) + (args.reg_weight * feature_transform_reg_loss(trans_feat))
+                    val_loss = criterion(logits, labels) + (args.reg_weight * feature_transform_reg_loss(trans_feat))
                 
-                total_val_loss += loss.item()
+                total_val_loss += val_loss.item()
                 preds = (torch.sigmoid(logits) > 0.5).float()
                 val_correct += (preds == labels).sum().item()
                 val_total += labels.size(0)
@@ -170,6 +178,8 @@ def train():
         if global_rank == 0:
             print(f"\nEpoch {epoch} | Val Loss: {avg_val_loss:.4f} | Acc: {(val_correct/val_total)*100:.2f}%")
             writer.add_scalar("Loss/Val", avg_val_loss, epoch)
+            
+            # Save Latest
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict(),
@@ -179,6 +189,7 @@ def train():
                 'val_loss': avg_val_loss,
             }, latest_ckpt_path)
 
+            # Save Best
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 shutil.copyfile(latest_ckpt_path, os.path.join(save_path, "collisionnet_best.pth"))

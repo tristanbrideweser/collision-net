@@ -24,13 +24,16 @@ ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data/scenes"
 
 echo "🚀 Starting Single-GPU Training with data at: $ABS_DATA_DIR"
 
-# 4. Launch with torchrun (matched to 1 GPU)
+PROJ_ROOT="/scratch/scholar/tbridewe/cs55800-project"
+
 srun torchrun \
     --standalone \
     --nnodes=1 \
     --nproc_per_node=1 \
     src/train.py \
     --data-dir "$ABS_DATA_DIR" \
+    --save-dir "$PROJ_ROOT/checkpoints" \
+    --log-dir "$PROJ_ROOT/runs/collisionnet_ddp" \
     --batch-size 128 \
-    --num-workers 4 \
-    --lr 0.0001
+    --lr 1e-4 \
+    --num-workers 4
