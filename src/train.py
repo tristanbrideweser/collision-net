@@ -34,7 +34,7 @@ def train():
     parser.add_argument("--reg-weight", type=float, default=0.001)
     parser.add_argument("--log-dir", type=str, default="../runs/collisionnet_ddp")
     parser.add_argument("--save-dir", type=str, default="../checkpoints")
-    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--num-workers", type=int, default=4)
     args = parser.parse_args()
 
     # 1. DDP Initialization
@@ -46,17 +46,16 @@ def train():
     torch.cuda.set_device(local_rank)
     device = torch.device("cuda", local_rank)
     
-    # Ensure absolute path for saving
     save_path = os.path.abspath(args.save_dir)
     
     if global_rank == 0:
-        print(f"--- Firing up DDP across {world_size} GPUs ---")
+        print(f"--- Firing up DDP with AMP across {world_size} GPUs ---")
         os.makedirs(save_path, exist_ok=True)
         writer = SummaryWriter(args.log_dir)
     else:
         writer = None
 
-    # 2. Datasets & Distributed Samplers
+    # 2. Datasets & Loaders
     train_ds = CollisionDataset(args.data_dir, split="train", augment=True)
     val_ds = CollisionDataset(args.data_dir, split="val", augment=False)
 
@@ -72,46 +71,41 @@ def train():
         num_workers=args.num_workers, pin_memory=True
     )
 
-    # 3. Model, Loss, Optimizer Setup
+    # 3. Model, Loss, Optimizer
     model = CollisionNet(embed_dim=1024, num_heads=8).to(device)
     criterion = nn.BCEWithLogitsLoss() 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
 
-    # 4. Auto-Resume Logic
+    # --- MIXED PRECISION SCALER ---
+    scaler = torch.cuda.amp.GradScaler()
+
+    # 4. Auto-Resume
     start_epoch = 1
     best_val_loss = float('inf')
     latest_ckpt_path = os.path.join(save_path, "collisionnet_latest.pth")
 
     if os.path.exists(latest_ckpt_path):
-        if global_rank == 0:
-            print(f"\n[INFO] Resuming from {latest_ckpt_path}...")
-        
+        if global_rank == 0: print(f"[INFO] Resuming from {latest_ckpt_path}...")
         checkpoint = torch.load(latest_ckpt_path, map_location=device, weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
+        if 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
         start_epoch = checkpoint['epoch']
         best_val_loss = checkpoint['val_loss']
 
-    # 5. DDP Wrapper
     model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
-    # 6. Training Loop
+    # 5. Training Loop
     for epoch in range(start_epoch, args.epochs + 1):
         train_sampler.set_epoch(epoch)
         model.train()
-        
         total_train_loss, train_correct, train_total = 0.0, 0, 0
         
-        pbar = tqdm(
-            train_loader, 
-            desc=f"Epoch {epoch}/{args.epochs} [Train]",
-            mininterval=60,
-            ascii=True
-        ) if global_rank == 0 else train_loader
+        pbar = tqdm(train_loader, desc=f"Ep {epoch} [Train]", mininterval=60, ascii=True) if global_rank == 0 else train_loader
         
         for i, batch in enumerate(pbar):
             robot_pts = batch["robot_keypoints"].to(device)
@@ -119,47 +113,39 @@ def train():
             labels = batch["label"].to(device)
 
             optimizer.zero_grad()
-            logits, _, trans_feat = model(robot_pts, scene_pts)
+
+            # --- AMP FORWARD PASS ---
+            with torch.cuda.amp.autocast():
+                logits, _, trans_feat = model(robot_pts, scene_pts)
+                bce_loss = criterion(logits, labels)
+                reg_loss = feature_transform_reg_loss(trans_feat)
+                loss = bce_loss + (args.reg_weight * reg_loss)
             
-            bce_loss = criterion(logits, labels)
-            reg_loss = feature_transform_reg_loss(trans_feat)
-            loss = bce_loss + (args.reg_weight * reg_loss)
-            
-            loss.backward()
-            optimizer.step()
+            # --- AMP BACKWARD PASS ---
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             total_train_loss += loss.item()
             preds = (torch.sigmoid(logits) > 0.5).float()
             train_correct += (preds == labels).sum().item()
             train_total += labels.size(0)
 
-            if global_rank == 0:
+            if global_rank == 0 and i % 500 == 0:
                 pbar.set_postfix({"loss": f"{loss.item():.4f}"})
-                
-                # SPRINT FIX: Save every 500 steps (and at step 0)
-                if i % 500 == 0:
-                    os.makedirs(save_path, exist_ok=True)
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': model.module.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'val_loss': best_val_loss,
-                    }, latest_ckpt_path)
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'val_loss': best_val_loss,
+                }, latest_ckpt_path)
 
-        avg_train_loss = total_train_loss / len(train_loader)
-        train_acc = train_correct / train_total
-
-        # 7. Validation Loop
+        # 6. Validation Loop
         model.eval()
         total_val_loss, val_correct, val_total = 0.0, 0, 0
-        
-        val_pbar = tqdm(
-            val_loader, 
-            desc=f"Epoch {epoch}/{args.epochs} [Val]",
-            mininterval=60,
-            ascii=True
-        ) if global_rank == 0 else val_loader
+        val_pbar = tqdm(val_loader, desc=f"Ep {epoch} [Val]", mininterval=60, ascii=True) if global_rank == 0 else val_loader
         
         with torch.no_grad():
             for batch in val_pbar:
@@ -167,8 +153,9 @@ def train():
                 scene_pts = batch["point_cloud"].to(device)
                 labels = batch["label"].to(device)
 
-                logits, _, trans_feat = model(robot_pts, scene_pts)
-                loss = criterion(logits, labels) + (args.reg_weight * feature_transform_reg_loss(trans_feat))
+                with torch.cuda.amp.autocast():
+                    logits, _, trans_feat = model(robot_pts, scene_pts)
+                    loss = criterion(logits, labels) + (args.reg_weight * feature_transform_reg_loss(trans_feat))
                 
                 total_val_loss += loss.item()
                 preds = (torch.sigmoid(logits) > 0.5).float()
@@ -176,34 +163,25 @@ def train():
                 val_total += labels.size(0)
 
         avg_val_loss = total_val_loss / len(val_loader)
-        val_acc = val_correct / val_total
         scheduler.step(avg_val_loss)
 
-        # 8. Logging and Saving (Rank 0)
         if global_rank == 0:
-            print(f"\n--- Epoch {epoch} Summary ---")
-            print(f"Train Loss: {avg_train_loss:.4f} | Acc: {train_acc*100:.2f}%")
-            print(f"Val Loss: {avg_val_loss:.4f} | Acc: {val_acc*100:.2f}%\n")
-
-            writer.add_scalar("Loss/Train", avg_train_loss, epoch)
+            print(f"\nEpoch {epoch} | Val Loss: {avg_val_loss:.4f} | Acc: {(val_correct/val_total)*100:.2f}%")
             writer.add_scalar("Loss/Val", avg_val_loss, epoch)
-            writer.add_scalar("Acc/Train", train_acc, epoch)
-            writer.add_scalar("Acc/Val", val_acc, epoch)
-
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.module.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': best_val_loss,
+                'scaler_state_dict': scaler.state_dict(),
+                'val_loss': avg_val_loss,
             }, latest_ckpt_path)
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 shutil.copyfile(latest_ckpt_path, os.path.join(save_path, "collisionnet_best.pth"))
 
-    if global_rank == 0:
-        writer.close()
+    if global_rank == 0: writer.close()
     dist.destroy_process_group()
 
 if __name__ == "__main__":
