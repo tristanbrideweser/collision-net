@@ -1,12 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=collisionnet_ddp
+#SBATCH --job-name=collisionnet_4gpu
+#SBATCH --partition=scholar-gpu
+#SBATCH --nodes=1
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=64G
+#SBATCH --time=04:00:00
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
-#SBATCH --partition=scholar-gpu
-#SBATCH --account=gpu
-#SBATCH --gpus-per-node=1
-#SBATCH --time=04:00:00
-#SBATCH --mem=64G
 
 # 1. Environment Setup
 module purge
@@ -26,5 +28,8 @@ echo "🚀 Starting DDP Training with data at: $ABS_DATA_DIR"
 srun torchrun \
     --standalone \
     --nnodes=1 \
-    --nproc_per_node=1 \
-    src/train.py --data-dir "$ABS_DATA_DIR" --batch-size 128 --epochs 50
+    --nproc_per_node=4 \
+    src/train.py \
+    --data-dir "/scratch/scholar/tbridewe/cs55800-project/data/scenes" \
+    --batch-size 128 \
+    --num-workers 4
