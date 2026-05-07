@@ -3,26 +3,28 @@
 #SBATCH --output=slurm-%j.out
 #SBATCH --error=slurm-%j.err
 #SBATCH --partition=scholar-gpu
-#SBATCH --account=gpu               # Using the account verified in your hw3 script
-#SBATCH --gpus-per-node=1           # Using the specific flag that worked for you
+#SBATCH --account=gpu
+#SBATCH --gpus-per-node=1
 #SBATCH --time=04:00:00
+#SBATCH --mem=64G
 
-# 1. Environment Setup (RCAC Style)
+# 1. Environment Setup
 module purge
 module load anaconda/2024.02-py311
 source venv/bin/activate
+
+# 2. Set PYTHONPATH so imports work correctly
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-# Determine GPUs dynamically (should be 1)
-NUM_GPUS=$(echo $CUDA_VISIBLE_DEVICES | awk -F ',' '{print NF}')
-echo "Igniting torchrun on $NUM_GPUS GPU(s)..."
+# 3. Define the ABSOLUTE path to your data
+# Adjust the path below if your 'data' folder is elsewhere in scratch
+ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data"
 
-cd src
+echo "🚀 Starting DDP Training with data at: $ABS_DATA_DIR"
 
-# 2. Launch DDP Training
-# Even on 1 GPU, torchrun ensures the environment is set up for the auto-resume logic
+# 4. Launch with torchrun
 srun torchrun \
     --standalone \
     --nnodes=1 \
-    --nproc_per_node=$NUM_GPUS \
-    train.py --batch-size 128 --epochs 50
+    --nproc_per_node=1 \
+    src/train.py --data-dir "$ABS_DATA_DIR" --batch-size 128 --epochs 50
