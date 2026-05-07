@@ -18,7 +18,7 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 # 3. Define the ABSOLUTE path to your data
 # Adjust the path below if your 'data' folder is elsewhere in scratch
-ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data"
+ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data/scenes"
 
 echo "🚀 Starting DDP Training with data at: $ABS_DATA_DIR"
 
