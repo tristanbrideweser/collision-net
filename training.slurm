@@ -31,5 +31,5 @@ srun torchrun \
     --nproc_per_node=1 \
     src/train.py \
     --data-dir "$ABS_DATA_DIR" \
-    --batch-size 256 \
+    --batch-size 128 \
     --num-workers 4
