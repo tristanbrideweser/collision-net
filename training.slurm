@@ -20,7 +20,7 @@ source venv/bin/activate
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 
 # 3. Define the ABSOLUTE path to your data
-ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data/scenes"
+ABS_DATA_DIR="/scratch/scholar/tbridewe/cs55800-project/data/scenes/generalist"
 
 echo "🚀 Starting Single-GPU Training with data at: $ABS_DATA_DIR"
 
@@ -33,7 +33,7 @@ srun torchrun \
     src/train.py \
     --data-dir "$ABS_DATA_DIR" \
     --save-dir "$PROJ_ROOT/checkpoints" \
-    --log-dir "$PROJ_ROOT/runs/collisionnet_ddp" \
+    --log-dir "$PROJ_ROOT/runs/collisionnet_ddp_b" \
     --batch-size 128 \
     --lr 1e-4 \
     --num-workers 4
