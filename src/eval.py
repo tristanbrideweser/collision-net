@@ -1,3 +1,5 @@
+# src/eval.py
+
 import torch
 import numpy as np
 import os
@@ -12,6 +14,7 @@ def evaluate():
     parser.add_argument("--data-dir", type=str, default="../data/scenes")
     parser.add_argument("--checkpoint", type=str, default="../checkpoints/collisionnet_best.pth")
     parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--limit", type=int, default=1000, help="limit samples for local eval")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -19,6 +22,13 @@ def evaluate():
     # 1. Load Data
     test_ds = CollisionDataset(args.data_dir, split="test", augment=False)
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, num_workers=4, pin_memory=True)
+    
+    if args.limit > 0:
+        indices = np.arange(args.limit)
+        test_ds.scene_ids = test_ds.scene_ids[indices]
+        test_ds.configs = test_ds.configs[indices]
+        test_ds.labels = test_ds.labels[indices]
+        print(f"🚀 Running Quick-Check on {args.limit} samples...")
 
     # 2. Load Model
     model = CollisionNet(embed_dim=1024, num_heads=8).to(device)
